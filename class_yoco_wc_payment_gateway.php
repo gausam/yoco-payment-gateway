@@ -319,6 +319,8 @@ class class_yoco_wc_payment_gateway extends WC_Payment_Gateway {
                 'client_email' => $order_data['billing']['email'],
                 'client_fn' => $order_data['billing']['first_name'],
                 'client_ln' => $order_data['billing']['last_name'],
+                'frontendResourcesError' => __( 'There was a network error while preparing your payment. Please retry.', 'yoco_wc_payment_gateway' ),
+                'frontendResourcesErrorAction' => __( 'Retry', 'yoco_wc_payment_gateway' )
             ) );
 
             wp_enqueue_script( 'woocommerce_yoco' );
