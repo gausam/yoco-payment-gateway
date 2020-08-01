@@ -193,11 +193,13 @@ class class_yoco_wc_error_logging
 
                 $uri = self::YOCO_ERROR_API_ENDPOINT . '/login';
                 $request = wp_remote_post($uri, $args);
-                $response = wp_remote_retrieve_body($request);
-                $response = json_decode($response, true);
-
-                if (array_key_exists('token', $response)) {
-                    return $response['token'];
+                if ( ! is_wp_error( $request ) ) {
+                  $response = wp_remote_retrieve_body($request);
+                  $response = json_decode($response, true);
+  
+                  if (array_key_exists('token', $response)) {
+                      return $response['token'];
+                  }
                 }
             }
         }
