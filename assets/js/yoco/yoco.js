@@ -1,5 +1,21 @@
 jQuery(document).ready( function() {
 
+    if (typeof ThrivePopup == "undefined") {
+       let div_error = document.createElement("div");
+       div_error.className = "row";
+       div_error.innerHTML =
+           '<div class="row"><ul class="woocommerce-error"><li>' +
+           yoco_params.frontendResourcesError +
+           "</li></ul>";
+       jQuery("#yoco_pay_now")
+           .before(div_error)
+           .text(yoco_params.frontendResourcesErrorAction)
+           .click(function () {
+               location.reload(true);
+           });
+       return;
+   }
+
     ThrivePopup.setup({
         publicKey: yoco_params.publicKey,
         amountInCents: yoco_params.amountInCents,
