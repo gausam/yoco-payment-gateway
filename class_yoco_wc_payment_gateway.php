@@ -636,15 +636,17 @@ class class_yoco_wc_payment_gateway extends WC_Payment_Gateway {
             return;
         }
 
-        $yoco_create_token_result = json_decode( html_entity_decode(
-            stripslashes ( $_POST['yoco_create_token_result'] )
-        ) );
+        $yoco_create_token_result = json_decode(
+          html_entity_decode( stripslashes (
+            $_POST['yoco_create_token_result']
+          )), true );
 
         $yoco_result = $this->sendtoYoco(
-            $yoco_create_token_result->id,
+            $yoco_create_token_result['id'],
             $this->convert_to_cents( $order->get_total() )
         );
 
+        $this->add_token_to_order($order, $yoco_create_token_result);
         return $this->process_result( $yoco_result, $order );
     }
 
@@ -670,6 +672,64 @@ class class_yoco_wc_payment_gateway extends WC_Payment_Gateway {
         return filter_var_array($source, $args);
     }
 
+    /**
+     * Add payment token to order.
+     * Returns false on failure or error.
+     * 
+     * @param  WC_Order $order         Order data.
+     * @param  mixed    $request_token Token payload.
+     * 
+     * mixed|false
+     */
+    public function add_token_to_order($order, $request_token) {
+        // No token from js request
+        if ( ! array_key_exists( 'id' , $request_token ) ) {
+            $error_message = 'Yoco - No Token Response';
+            set_transient( 'yoco_pg_error_order_' . $order->ID, $error_message );
+            class_yoco_wc_error_logging::logError(
+                "WC_TOKEN",
+                -1,
+                $error_message,
+                ['order_id' => $order->ID]
+            );
+            return false;
+        }
+
+        $token_id = filter_var( $request_token['id'], FILTER_SANITIZE_STRING );
+
+        try {
+            $source = $this->filter_source( $request_token['source'] );
+            $token = new WC_Payment_Token_CC();
+            $token->set_token( $token_id );
+            $token->set_gateway_id( $this->id );
+            $token->set_card_type( $source['brand'] );
+            $token->set_last4(
+            substr(
+                $source['maskedCard'],
+                strlen( $source['maskedCard'] ) - 4
+            ),
+            strlen( $source['maskedCard'] )
+            );
+            $token->set_expiry_month( $source['expiryMonth'] );
+            $token->set_expiry_year( $source['expiryYear'] );
+
+            $token->set_user_id( get_current_user_id() );
+
+            $res = $token->save();
+            $order->add_payment_token( $token );
+            return $res;
+        } catch (Exception $e) {
+            wc_add_notice( $e->getMessage(), 'error' );
+            set_transient( 'yoco_pg_error_order_'.$order->ID, $e->getMessage() );
+            class_yoco_wc_error_logging::logError(
+                "WC_TOKEN",
+                0,
+                $e->getMessage(),
+                ['order_id' => $order->ID]
+            );
+            return false;
+        }
+    }
 
     /**
      * Ajax Store Yoco Token
@@ -678,43 +738,10 @@ class class_yoco_wc_payment_gateway extends WC_Payment_Gateway {
 
         check_ajax_referer( 'nonce_store_yoco_token', 'nonce' );
         if (isset($_POST['token'])) {
-            if (array_key_exists('id', $_POST['token'])) {
-                $_POST['token']['id'] = $token_id = filter_var($_POST['token']['id'], FILTER_SANITIZE_STRING);
-                $_POST['order_id'] = $order_id = filter_var($_POST['order_id'], FILTER_SANITIZE_NUMBER_INT);
-                $_POST['token']['source'] = $source = $this->filter_source($_POST['token']['source']);
-                $token = new WC_Payment_Token_CC();
-
-                try {
-                    $token->set_token($token_id);
-                    $token->set_gateway_id($this->id);
-                    $token->set_card_type($source['brand']);
-                    $token->set_last4(substr($source['maskedCard'], strlen($source['maskedCard']) - 4), strlen($source['maskedCard']));
-                    $token->set_expiry_month($source['expiryMonth']);
-                    $token->set_expiry_year($source['expiryYear']);
-
-                    $token->set_user_id(get_current_user_id());
-
-                    $res = $token->save();
-                    $order = wc_get_order($order_id);
-                    $order->add_payment_token($token);
-                } catch (Exception $e) {
-                    set_transient('yoco_pg_error_order_'.$order_id, $e->getMessage());
-                    class_yoco_wc_error_logging::logError("WC_TOKEN", 0, $e->getMessage(), ['order_id' => $order_id]);
-                    $res = false;
-                }
-
-                wp_send_json(array('status' => $res, 'post' => $_POST));
-            } else {
-                /**
-                 * No token from js request
-                 */
-                $order_id = filter_var($_POST['order_id'], FILTER_SANITIZE_NUMBER_INT);
-                $error_message = 'Yoco - No Token Response';
-
-                set_transient('yoco_pg_error_order_'.$order_id, $error_message);
-                class_yoco_wc_error_logging::logError("WC_TOKEN", -1, $error_message, ['order_id' => $order_id]);
-                wp_send_json(array('status' => false));
-            }
+            $order_id = filter_var($_POST['order_id'], FILTER_SANITIZE_NUMBER_INT);
+            $order = wc_get_order($order_id);
+            $res = $this->add_token_to_order($order, $_POST['token']);
+            wp_send_json(array('status' => $res, 'post' => $_POST));
 
             if (array_key_exists('error', $_POST['token'])) {
                 $order_id = filter_var($_POST['order_id'], FILTER_SANITIZE_NUMBER_INT);
@@ -730,8 +757,6 @@ class class_yoco_wc_payment_gateway extends WC_Payment_Gateway {
             set_transient('yoco_pg_error_order_'.$order_id, $error_message);
             class_yoco_wc_error_logging::logError("WC_TOKEN", 0, $error_message, ['order_id' => $order_id]);
             wp_send_json(array('status' => false));
-
-
         } else {
             $order_id = filter_var($_POST['order_id'], FILTER_SANITIZE_NUMBER_INT);
             $error_message = 'Unspecified error';
