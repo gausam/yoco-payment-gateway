@@ -16,5 +16,9 @@
 #yoco_pay_now:hover {
     background: #000000;
     color: #ffffff;
+}
 
+.yoco-wc-payment-gateway-error {
+    margin-top: 1em;
+    margin-bottom: 2em;
 }
