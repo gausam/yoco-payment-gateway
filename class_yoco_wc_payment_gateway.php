@@ -7,6 +7,7 @@ if ( !defined( 'ABSPATH' ) ) {
 require_once 'class_yoco_wc_error_logging.php';
 
 class class_yoco_wc_payment_gateway extends WC_Payment_Gateway {
+    const INLINE_SDK_ENDPOINT = 'https://js.yoco.com/sdk/v1/yoco-sdk-web.js';
     const THRIVE_POPUP_SDK_ENDPOINT = 'https://online.yoco.com/v1/popup.js';
     const THRIVE_CREATE_CHARGE_ENDPOINT = 'https://online.yoco.com/v1/charges/';
     const WC_API_TOKEN_ENDPOINT = '/?wc-api=store_yoco_token';
@@ -23,7 +24,8 @@ class class_yoco_wc_payment_gateway extends WC_Payment_Gateway {
         $this->icon = plugins_url( 'assets/images/yoco/yoco_small.png', __FILE__ );
         $this->method_title = 'Yoco Payment Gateway';
         $this->method_description = 'Pay via Yoco';
-        $this->has_fields = false;
+        $this->inline_mode = $this->get_option( 'inline_mode' ) === 'yes';
+        $this->has_fields = $this->inline_mode;
         $this->supports = array(
             'products',
             'tokenization'
@@ -78,6 +80,57 @@ class class_yoco_wc_payment_gateway extends WC_Payment_Gateway {
 
     }
 
+    /**
+     * Frontend payment fields for Yoco Inline.
+     */
+    public function payment_fields() {
+        global $wp;
+        $user                 = wp_get_current_user();
+        $total                = WC()->cart->total;
+    
+        // user details available only when logged in
+        // but we need the order total, so let's get that
+        // we also need the email
+
+        // If paying from order, we need to get total from order not cart.
+        if ( isset( $_GET['pay_for_order'] ) && ! empty( $_GET['key'] ) ) {
+            $order      = wc_get_order( wc_clean( $wp->query_vars['order-pay'] ) );
+            $total      = $order->get_total();
+            $user_email = $order->get_billing_email();
+            $billing_first_name = $order->get_billing_first_name();
+            $billing_last_name  = $order->get_billing_last_name();
+        } else {
+            if ( $user->ID ) {
+            $user_email = get_user_meta( $user->ID, 'billing_email', true );
+            $user_email = $user_email ? $user_email : $user->user_email;
+            $billing_first_name = get_user_meta( $user->ID, 'billing_first_name', true );
+            $billing_last_name  = get_user_meta( $user->ID, 'billing_last_name', true );
+            }
+        }
+
+        ob_start();
+
+        echo '<div
+            id="yoco-payment-data"
+                data-currency="' . esc_attr( get_woocommerce_currency() ) . '"
+                data-amount-in-cents="' . esc_attr( $this->convert_to_cents( $total ) ) . '"
+                data-client-email="' . esc_attr( $user_email ) . '"
+                data-client-fn="' . esc_attr( $billing_first_name ) . '"
+                data-client-ln="' . esc_attr( $billing_last_name ) . '"
+            >';
+
+        ?>
+            <div class="one-liner">
+                <div id="card-frame">
+                <!-- Yoco Inline form will be added here -->
+                </div>
+            </div>
+            <div id="yoco-wc-payment-gateway-errors" role="alert"></div>
+            <br />
+
+        <?php
+        ob_end_flush();
+    }
 
     public function admin_options() {
         if ( $this->is_currency_valid_for_use() ) {
@@ -208,6 +261,13 @@ class class_yoco_wc_payment_gateway extends WC_Payment_Gateway {
                     'test' => 'Test'
                 )
             ),
+            'inline_mode'   => array(
+              'title'       => 'Inline Payments',
+              'label'       => 'Enable Yoco Inline Payments',
+              'type'        => 'checkbox',
+              'description' => 'Inline integrates into your existing checkout page to create a seamless customer experience.',
+              'default'     => 'no'
+            ),
 
             'live_secret_key' => array(
                 'title'       => 'Live Secret Key',
@@ -235,20 +295,36 @@ class class_yoco_wc_payment_gateway extends WC_Payment_Gateway {
 
     }
 
+    /**
+     * Get order total formatted as cents.
+     * 
+     * @return int
+     */
     private function getOrderTotal() {
-        return absint( wc_format_decimal( ( WC_Payment_Gateway::get_order_total() * 100 ), wc_get_price_decimals() ) );
+        return $this->convert_to_cents( WC_Payment_Gateway::get_order_total() );
+    }
+
+    /**
+     * Convert regular amount to cents.
+     * 
+     * @param mixed $amount Amount to be expressed in cents.
+     * @return int
+     */
+    private function convert_to_cents($amount) {
+        return absint( wc_format_decimal( ( $amount * 100 ), wc_get_price_decimals() ) );
     }
 
     /***
      * @param $token
+     * @param $amount_in_cents
      * @return mixed
      * Send token to Yoco
      */
-    private function sendtoYoco($token) {
+    private function sendtoYoco($token, $amount_in_cents) {
 
         $body = [
             'token' => $token,
-            'amountInCents' => $this->getOrderTotal(),
+            'amountInCents' => $amount_in_cents,
             'currency' => get_woocommerce_currency()
             ];
 
@@ -298,33 +374,49 @@ class class_yoco_wc_payment_gateway extends WC_Payment_Gateway {
             return;
         }
 
+        $woocommerce_yoco_handle = $this->inline_mode ? 'woocommerce_yoco_inline' : 'woocommerce_yoco';
+        $woocommerce_yoco_path = $this->inline_mode ?  'assets/js/yoco/yoco_inline.js' : 'assets/js/yoco/yoco.js';
+        $woocommerce_yoco_deps = $this->inline_mode ? 'yoco_web_js' : 'yoco_js';
+
+        if ( $this->inline_mode ) {
+            wp_enqueue_script( 'yoco_web_js', self::INLINE_SDK_ENDPOINT );
+        } else {
+            wp_enqueue_script( 'yoco_js', self::THRIVE_POPUP_SDK_ENDPOINT );
+        }
+        wp_register_script(
+            $woocommerce_yoco_handle,
+            plugins_url( $woocommerce_yoco_path, __FILE__ ),
+            array( 'jquery', $woocommerce_yoco_deps ),
+            '1.0.0',
+            false
+        );
+        wp_enqueue_style('orderpay_styles', plugins_url( 'assets/css/frontend/orderpay.css', __FILE__ ) );
+
+        $yoco_params = array(
+            'publicKey' => $this->publishable_key,
+            'currency' => 'ZAR',
+            'url' => get_site_url().self::WC_API_TOKEN_ENDPOINT,
+            'nonce' => wp_create_nonce( 'nonce_store_yoco_token' ),
+            'is_checkout' => ( is_checkout() && empty( $_GET['pay_for_order'] ) ) ? 'yes' : 'no',
+            'is_order_payment' => 'no'
+        );
 
         if ( is_wc_endpoint_url( 'order-pay' ) ) {
             $order_id = $this->get_order_id_order_pay_yoco();
             $order = wc_get_order($order_id);
             $order_data = $order->get_data();
 
-            wp_enqueue_script( 'yoco_js', self::THRIVE_POPUP_SDK_ENDPOINT );
-            wp_enqueue_style('customer_styles', plugins_url( 'assets/css/customer/customer.css', __FILE__ ) );
-            wp_register_script( 'woocommerce_yoco', plugins_url( 'assets/js/yoco/yoco.js', __FILE__ ), array( 'jquery', 'yoco_js' ) ,'1.0.0', false);
-            wp_enqueue_style('orderpay_styles', plugins_url( 'assets/css/frontend/orderpay.css', __FILE__ ) );
-            wp_localize_script( 'woocommerce_yoco', 'yoco_params', array(
-                'publicKey' => $this->publishable_key,
-                'amountInCents' => $this->getOrderTotal(),
-                'currency' => 'ZAR',
-                'triggerElement' => '#yoco_pay_now',
-                'order_id' => $order_id,
-                'url' => get_site_url().self::WC_API_TOKEN_ENDPOINT,
-                'nonce' => wp_create_nonce('nonce_store_yoco_token'),
-                'client_email' => $order_data['billing']['email'],
-                'client_fn' => $order_data['billing']['first_name'],
-                'client_ln' => $order_data['billing']['last_name'],
-            ) );
-
-            wp_enqueue_script( 'woocommerce_yoco' );
+            $yoco_params['is_order_payment'] = 'yes';
+            $yoco_params['amountInCents'] = $this->getOrderTotal();
+            $yoco_params['triggerElement'] = '#yoco_pay_now';
+            $yoco_params['order_id'] = $order_id;
+            $yoco_params['client_email'] = $order_data['billing']['email'];
+            $yoco_params['client_fn'] = $order_data['billing']['first_name'];
+            $yoco_params['client_ln'] = $order_data['billing']['last_name'];
         }
 
-
+        wp_localize_script( $woocommerce_yoco_handle, 'yoco_params', $yoco_params );
+        wp_enqueue_script( $woocommerce_yoco_handle );
     }
 
     /**
@@ -351,9 +443,16 @@ class class_yoco_wc_payment_gateway extends WC_Payment_Gateway {
         wc_reduce_stock_levels( $order->get_id() );
 
         $woocommerce->cart->empty_cart();
-        wp_redirect($order->get_checkout_order_received_url());
-        exit;
 
+        if ( ! $this->inline_mode ) {
+            wp_redirect($order->get_checkout_order_received_url());
+            exit;
+        }
+        
+        return array(
+            'result' => 'success',
+            'redirect' => $this->get_return_url( $order )
+        );
     }
 
     /***
@@ -368,9 +467,11 @@ class class_yoco_wc_payment_gateway extends WC_Payment_Gateway {
         // Add WC Notice
         wc_add_notice( $this->yoco_wc_customer_error_msg, 'error' );
         $this->set_wc_admin_notice('Yoco Payment Gateway Error [Order# '.$order->get_id().']: '.$message);
-        // Redirect to Cart Page
-        wp_redirect(wc_get_checkout_url());
-        exit;
+        if ( ! $this->inline_mode ) {
+            // Redirect to Cart Page
+            wp_redirect(wc_get_checkout_url());
+            exit;
+        }
     }
 
     /***
@@ -387,9 +488,11 @@ class class_yoco_wc_payment_gateway extends WC_Payment_Gateway {
         wc_add_notice( $message, 'error' );
         $this->set_wc_admin_notice('Yoco Payment Gateway Error [Order# '.$order->get_id().']: '.$code);
         class_yoco_wc_error::save_yoco_customer_order_error($order->get_id(), $code, $message);
-        // Redirect to Cart Page
-        wp_redirect(wc_get_checkout_url());
-        exit;
+        if ( ! $this->inline_mode ) {
+            // Redirect to Cart Page
+            wp_redirect(wc_get_checkout_url());
+            exit;
+        }
     }
 
     /**
@@ -416,6 +519,42 @@ class class_yoco_wc_payment_gateway extends WC_Payment_Gateway {
         WC_Admin_Notices::add_custom_notice('yoco_payment_gateway', $html);
     }
 
+    /**
+     * Processes charge API response and returns appropriate response.
+     *
+     * @param  string   $yoco_result Result from invocation of sendtoYoco method.
+     * @param  WC_Order $order       Order data.
+     * @return mixed
+     */
+    public function process_result($yoco_result, $order) {
+        if (is_string($yoco_result)) {
+            return $this->process_failure($order, $yoco_result);
+        }
+
+        if ( is_array( $yoco_result ) && array_key_exists( 'status', $yoco_result ) ) {
+            switch ($yoco_result['status']) {
+                case "successful":
+                    if ($this->testmode) {
+                        return $this->process_success($order);
+                    } else {
+                        return $this->process_success($order);
+                    }
+                    break;
+                default:
+                    return $this->process_failure($order, $yoco_result['message']);
+                    break;
+
+            }
+        }
+
+        if ( is_array( $yoco_result ) && array_key_exists( 'errorCode' , $yoco_result ) ) {
+            return $this->process_yoco_failure(
+                $order,
+                $yoco_result['errorCode'],
+                $yoco_result['displayMessage']
+            );
+        }
+    }
 
     /**
      * @param $order_id
@@ -433,35 +572,12 @@ class class_yoco_wc_payment_gateway extends WC_Payment_Gateway {
         if (!empty($order->get_payment_tokens())) {
             $token = WC_Payment_Tokens::get( $order->get_payment_tokens()[0] );
             if ($token->get_token()) {
-
-                $yoco_result = $this->sendtoYoco($token->get_token());
-
-                if (is_string($yoco_result)) {
-                    $this->process_failure($order, $yoco_result);
-                }
-
-                if (is_array($yoco_result) && array_key_exists('status', $yoco_result)) {
-                    switch ($yoco_result['status']) {
-                        case "successful":
-                            if ($this->testmode) {
-                                $this->process_success($order);
-                            } else {
-                                $this->process_success($order);
-                            }
-                            break;
-                        default:
-                            $this->process_failure($order, $yoco_result['message']);
-                            break;
-
-                    }
-                }
-
-                if (is_array($yoco_result) && array_key_exists('errorCode', $yoco_result)) {
-                    $this->process_yoco_failure($order, $yoco_result['errorCode'], $yoco_result['displayMessage']);
-                }
-
+                $yoco_result = $this->sendtoYoco(
+                    $token->get_token(),
+                    $this->getOrderTotal()
+                );
+                $this->process_result( $yoco_result, $order );
             }
-
         }
 
         ?>
@@ -470,14 +586,70 @@ class class_yoco_wc_payment_gateway extends WC_Payment_Gateway {
         return true;
     }
 
+    /**
+     * Validate frontend fields.
+     *
+     * Validate payment fields on the frontend.
+     *
+     * @return bool
+     */
+    public function validate_fields() {
+        if ( ! $this->inline_mode ) {
+            return true;
+        }
 
+        if ( ! isset( $_POST['yoco_create_token_result'] ) ) {
+            wc_add_notice(
+                __( 'Payment error: ', 'woothemes' ) . __( "Invalid request", 'yoco_payment_gateway' ),
+                'error'
+            );
+            return false;
+        }
+
+        $yoco_result = json_decode( html_entity_decode(
+            stripslashes ( $_POST['yoco_create_token_result'] )
+        ) );
+
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            wc_add_notice(
+                __('Payment error: ', 'woothemes') . __("Invalid request", 'yoco_payment_gateway'),
+                'error'
+            );
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * Process Payment.
+     *
+     * @param int $order_id Order ID.
+     * @return mixed
+     */
     public function process_payment( $order_id ) {
         $order = new WC_Order( $order_id );
+        if ( ! $this->inline_mode ) {
+            return array(
+                'result' => 'success',
+                'redirect' => $order->get_checkout_payment_url( true )
+            );
+        }
 
-        return array(
-            'result' => 'success',
-            'redirect' => $order->get_checkout_payment_url( true )
+        if ( ! $this->validate_fields() ) {
+            return;
+        }
+
+        $yoco_create_token_result = json_decode( html_entity_decode(
+            stripslashes ( $_POST['yoco_create_token_result'] )
+        ) );
+
+        $yoco_result = $this->sendtoYoco(
+            $yoco_create_token_result->id,
+            $this->convert_to_cents( $order->get_total() )
         );
+
+        return $this->process_result( $yoco_result, $order );
     }
 
 
@@ -586,5 +758,3 @@ class class_yoco_wc_payment_gateway extends WC_Payment_Gateway {
 
 
 }
-
-
